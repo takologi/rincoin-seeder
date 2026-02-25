@@ -219,6 +219,17 @@ public:
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_P2P_V2); // xc08
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_P2P_V2 | NODE_COMPACT_FILTERS); // xc48
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_BLOOM); // x40c
+        // MWEB variants — mirror every WITNESS combo above with NODE_MWEB added
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_MWEB);                                        // x1000009
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_MWEB | NODE_BLOOM);                            // x100000d
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_MWEB | NODE_COMPACT_FILTERS);                  // x1000049
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2);                           // x1000809
+        filter_whitelist.insert(NODE_NETWORK | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2 | NODE_COMPACT_FILTERS);    // x1000849
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB);                                  // x1000408
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_BLOOM);                     // x100040c
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_COMPACT_FILTERS);           // x1000448
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2);                    // x1000c08
+        filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2 | NODE_COMPACT_FILTERS); // x1000c48
     }
     if (host != NULL && ns == NULL) showHelp = true;
     if (showHelp) fprintf(stderr, help, argv[0]);

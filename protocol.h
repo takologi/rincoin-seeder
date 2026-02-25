@@ -66,6 +66,8 @@ enum
     NODE_COMPACT_FILTERS = (1 << 6),
     NODE_NETWORK_LIMITED = (1 << 10),
     NODE_P2P_V2 = (1 << 11),
+    NODE_MWEB_LIGHT_CLIENT = (1 << 23),
+    NODE_MWEB = (1 << 24),
 };
 
 class CAddress : public CService
