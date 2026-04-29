@@ -6,7 +6,12 @@
 #include "serialize.h"
 #include "uint256.h"
 
-#define BITCOIN_SEED_NONCE  0x0539a019ca550825ULL
+// Hard-coded local nonce sent in our `version` message. Bitcoin-protocol
+// peers use this to detect that they have connected to themselves; using a
+// fixed value makes the seeder trivially identifiable to operators looking
+// at `getpeerinfo` and avoids any chance of self-connect heuristics being
+// confused by a randomly chosen nonce that happens to clash.
+#define RINCOIN_SEED_NONCE  0x0539a019ca550825ULL
 
 using namespace std;
 
@@ -75,12 +80,17 @@ class CNode {
   
   void PushVersion() {
     int64 nTime = time(NULL);
-    uint64 nLocalNonce = BITCOIN_SEED_NONCE;
+    uint64 nLocalNonce = RINCOIN_SEED_NONCE;
     int64 nLocalServices = 0;
     CAddress me(CService("0.0.0.0"));
     BeginMessage("version");
     int nBestHeight = GetRequireHeight();
-    string ver = "/bitcoin-seeder:0.01/";
+    // Subversion string advertised to peers in the `version` message.
+    // Format follows BIP14 (slash-delimited). Peers display this in
+    // `getpeerinfo` so node operators can recognise the seeder.
+    // Bumped from "/bitcoin-seeder:0.01/" together with the
+    // PROTOCOL_VERSION upgrade to 70018 (customized halving).
+    string ver = "/rincoin-community-seeder:2.0.0/";
     uint8_t fRelayTxs = 0;
     vSend << PROTOCOL_VERSION << nLocalServices << nTime << you << me << nLocalNonce << ver << nBestHeight << fRelayTxs;
     EndMessage();
@@ -296,6 +306,20 @@ bool TestNode(const CService &cip, int &ban, int &clientV, std::string &clientSV
     clientSV = node.GetClientSubVersion();
     blocks = node.GetStartingHeight();
     services = node.GetServices();
+    // Track the highest chain tip we've ever seen reported by a peer.
+    // db.h::IsCustomizedHalvingEnforced() reads this to decide whether
+    // the customized-halving cutoff is currently active. We only fold
+    // in heights from a peer that finished the version handshake
+    // (i.e. blocks > 0) and that we managed to talk to successfully —
+    // otherwise a malicious or buggy peer could push the cutoff with
+    // a bogus value. ret == true ensures the handshake completed and
+    // GetBan() returned 0.
+    if (ret && blocks > 0) {
+        int prev = nBestSeenHeight.load(std::memory_order_relaxed);
+        while (blocks > prev &&
+               !nBestSeenHeight.compare_exchange_weak(prev, blocks,
+                                                      std::memory_order_relaxed)) {}
+    }
 //  printf("%s: %s!!!\n", cip.ToString().c_str(), ret ? "GOOD" : "BAD");
     return ret;
   } catch(std::ios_base::failure& e) {
@@ -306,7 +330,11 @@ bool TestNode(const CService &cip, int &ban, int &clientV, std::string &clientSV
 
 /*
 int main(void) {
-  CService ip("bitcoin.sipa.be", 8333, true);
+  // Standalone smoke test entry point. Replaced bitcoin.sipa.be (the
+  // upstream bitcoin-seeder author's test host) with the rincoin
+  // production seed. Compile only when the surrounding comment block is
+  // removed and `g++ rincoin.cpp ... -o test` is invoked manually.
+  CService ip("seed.rincoin.net", 9555, true);
   vector<CAddress> vAddr;
   vAddr.clear();
   int ban = 0;

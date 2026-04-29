@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <math.h>
+#include <atomic>
 
 #include <set>
 #include <map>
@@ -12,12 +13,46 @@
 
 #define MIN_RETRY 1000
 
+// Legacy minimum protocol version — peers below this are never advertised
+// regardless of network state. Pre-existed in the upstream bitcoin-seeder.
 #define REQUIRE_VERSION 70001
 
+// Mirror of Rincoin Core `MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION`
+// (`src/version.h`). Once the customized halving has activated on the
+// active chain, Rincoin nodes disconnect any peer that announces a
+// version strictly below this. The seeder mirrors that policy by no
+// longer marking such peers as "good" (see `IsGood()` below) — they
+// will still be crawled (so we benefit from any addr gossip they may
+// still know) but will never be returned in DNS answers.
+#define MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION 70018
+
 extern int nMinimumHeight;
+// Activation height of the customized halving on the network the seeder
+// is crawling. Set by main() based on --testnet / --customizedhalvingheight.
+// 0 disables the check entirely (useful for regtest / private networks
+// that never activate it). Mainnet: 4 * 210000 = 840000.
+extern int nCustomizedHalvingHeight;
+// Highest `nStartingHeight` ever reported by any successfully-crawled
+// peer. Updated from TestNode(). Atomic because TestNode runs from the
+// crawler thread pool while IsGood() is called from the DNS / dump
+// threads. Strict monotonic upper bound is fine for the security check
+// — a single advanced peer is sufficient evidence that activation has
+// happened on the longest chain.
+extern std::atomic<int> nBestSeenHeight;
+
 static inline int GetRequireHeight(const bool testnet = fTestNet)
 {
     return nMinimumHeight ? nMinimumHeight : (testnet ? 50 : 35);
+}
+
+// True iff the customized halving cutoff is currently being enforced —
+// i.e. the seeder has observed at least one peer whose chain tip is at
+// or beyond the configured activation height. Inline so IsGood() stays
+// header-only.
+static inline bool IsCustomizedHalvingEnforced()
+{
+    return nCustomizedHalvingHeight > 0 &&
+           nBestSeenHeight.load(std::memory_order_relaxed) >= nCustomizedHalvingHeight;
 }
 
 std::string static inline ToString(const CService &ip) {
@@ -107,6 +142,19 @@ public:
     if (!ip.IsRoutable()) return false;
     if (clientVersion && clientVersion < REQUIRE_VERSION) return false;
     if (blocks && blocks < GetRequireHeight()) return false;
+
+    // Customized halving cutoff (mirrors Rincoin Core's
+    // MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION enforcement). Once the
+    // seeder has observed any peer at or past the activation height,
+    // peers still announcing a pre-upgrade protocol version (< 70018)
+    // are demoted to "not good" and stop appearing in DNS answers.
+    // We deliberately do *not* ban them: an honest operator who later
+    // upgrades will be re-listed by the next crawl cycle without
+    // having to wait out a multi-day ban window.
+    if (clientVersion && clientVersion < MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION &&
+        IsCustomizedHalvingEnforced()) {
+        return false;
+    }
 
     if (total <= 3 && success * 2 >= total) return true;
 

@@ -1,9 +1,10 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
+// Copyright (c) 2024-2026 The Rincoin community developers
 // Copyright (c) 2011 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
-#ifndef BITCOIN_SERIALIZE_H
-#define BITCOIN_SERIALIZE_H
+#ifndef RINCOIN_SERIALIZE_H
+#define RINCOIN_SERIALIZE_H
 
 #include <string>
 #include <vector>
@@ -60,7 +61,26 @@ class CDataStream;
 class CAutoFile;
 static const unsigned int MAX_SIZE = 0x02000000;
 
-static const int PROTOCOL_VERSION = 60000;
+// Protocol version advertised by this seeder when negotiating with peers.
+//
+// Why 70018?
+// ----------
+// Rincoin Core defines `CUSTOMIZED_HALVING_VERSION = 70018` in
+// `src/version.h`. After the customized halving activation height,
+// `net_processing.cpp` disconnects any peer that announces a
+// version < 70018 (`MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION`).
+//
+// The seeder must therefore advertise at least 70018, otherwise it would
+// be unable to crawl the network as soon as the upgrade activates and the
+// `dnsseed.dat` database would slowly rot until no node passes
+// `IsGood()` (see `db.h`).
+//
+// Advertising 70018 *before* activation is harmless: peers running older
+// 70017 builds only enforce `nVersion >= MIN_PEER_PROTO_VERSION` (31800)
+// for the connection, and the pre-upgrade warning in net_processing.cpp
+// fires only for `nVersion < 70018`, never for an *equal-or-higher*
+// version. So bumping unconditionally is safe.
+static const int PROTOCOL_VERSION = 70018;
 
 // Used to bypass the rule against non-const reference to temporary
 // where it makes sense with wrappers such as CFlatData or CTxDB

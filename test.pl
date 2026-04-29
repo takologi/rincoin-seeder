@@ -6,7 +6,11 @@ use bytes;
 use IO::Socket;
 use strict;
 
-my @dom = ("seed","bitcoin","sipa","be");
+# DNS labels making up the seed FQDN to flood with queries during the
+# load test. Was bitcoin-seeder's seed.bitcoin.sipa.be; switched to the
+# rincoin production zone. Edit if you point your seeder at a different
+# zone via -h.
+my @dom = ("seed","rincoin","net");
 
 my $run :shared = 1;
 

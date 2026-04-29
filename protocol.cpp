@@ -1,3 +1,4 @@
+// Copyright (c) 2024-2026 The Rincoin community developers
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2011 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying

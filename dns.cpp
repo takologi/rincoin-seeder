@@ -11,6 +11,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "dns.h"
 
@@ -279,26 +280,51 @@ ssize_t static dnshandle(dns_opt_t *opt, const unsigned char *inbuf, size_t insi
   // clear error
   outbuf[3] &= ~15;
   // check qr
-  if (inbuf[2] & 128) return set_error(outbuf, 1); /* printf("Got response?\n"); */
+  if (inbuf[2] & 128) { opt->nRefusedFormat++; return set_error(outbuf, 1); } /* printf("Got response?\n"); */
   // check opcode
-  if (((inbuf[2] & 120) >> 3) != 0) return set_error(outbuf, 1); /* printf("Opcode nonzero?\n"); */
+  if (((inbuf[2] & 120) >> 3) != 0) { opt->nRefusedFormat++; return set_error(outbuf, 1); } /* printf("Opcode nonzero?\n"); */
   // unset TC
   outbuf[2] &= ~2;
   // unset RA
   outbuf[3] &= ~128;
   // check questions
   int nquestion = (inbuf[4] << 8) + inbuf[5];
-  if (nquestion == 0) return set_error(outbuf, 0); /* printf("No questions?\n"); */
-  if (nquestion > 1) return set_error(outbuf, 4); /* printf("Multiple questions %i?\n", nquestion); */
+  if (nquestion == 0) { opt->nRefusedFormat++; return set_error(outbuf, 0); } /* printf("No questions?\n"); */
+  if (nquestion > 1) { opt->nRefusedFormat++; return set_error(outbuf, 4); } /* printf("Multiple questions %i?\n", nquestion); */
   const unsigned char *inpos = inbuf + 12;
   const unsigned char *inend = inbuf + insize;
   char name[256];
   int offset = inpos - inbuf;
   int ret = parse_name(&inpos, inend, inbuf, name, 256);
-  if (ret == -1) return set_error(outbuf, 1);
-  if (ret == -2) return set_error(outbuf, 5);
-  int namel = strlen(name), hostl = strlen(opt->host);
-  if (strcasecmp(name, opt->host) && (namel<hostl+2 || name[namel-hostl-1]!='.' || strcasecmp(name+namel-hostl,opt->host))) return set_error(outbuf, 5);
+  if (ret == -1) { opt->nRefusedFormat++; return set_error(outbuf, 1); }
+  if (ret == -2) { opt->nRefusedFormat++; return set_error(outbuf, 5); }
+
+  // Multi-zone match: walk every configured zone and pick the first one
+  // whose `host` is either equal to the queried name or is a suffix of it
+  // (separated by a '.'). The matched zone's NS / mbox values are then
+  // used when building SOA / NS records below.
+  //
+  // Filter queries of the form `xHHHH.<host>` are accepted here too —
+  // GetIPList() in main.cpp will validate the hex flags against the
+  // whitelist when generating A / AAAA answers.
+  const dns_zone_t *zone = NULL;
+  int namel = strlen(name);
+  for (size_t z = 0; z < opt->zones.size(); ++z) {
+    const std::string &h = opt->zones[z].host;
+    int hostl = (int)h.size();
+    if (strcasecmp(name, h.c_str()) == 0 ||
+        (namel >= hostl + 2 && name[namel - hostl - 1] == '.' &&
+         strcasecmp(name + namel - hostl, h.c_str()) == 0)) {
+      zone = &opt->zones[z];
+      break;
+    }
+  }
+  if (!zone) { opt->nRefusedNoZone++; return set_error(outbuf, 5); }
+  // RFC 1035 SOA MNAME can only carry a single name. We standardise on
+  // the first NS in the list as the primary master; the remaining NS
+  // entries are emitted alongside it in the NS RRset for HA setups.
+  const char *ns_host = zone->ns.empty() ? "" : zone->ns[0].c_str();
+  const char *mbox    = zone->mbox.c_str();
   if (inend - inpos < 4) return set_error(outbuf, 1);
   // copy question to output
   memcpy(outbuf+12, inbuf+12, inpos+4 - (inbuf+12));
@@ -324,13 +350,19 @@ ssize_t static dnshandle(dns_opt_t *opt, const unsigned char *inbuf, size_t insi
   int max_auth_size = 0;
   
   if (!((typ == TYPE_NS || typ == QTYPE_ANY) && (cls == CLASS_IN || cls == QCLASS_ANY))) {
-    // authority section will be necessary, either NS or SOA
+    // Authority section will be necessary, either NS-set or SOA. We must
+    // reserve room for *every* NS record, not just one, so that an HA
+    // zone with several NS entries doesn't get its A/AAAA answer
+    // truncated by an underestimate here.
     unsigned char *newpos = outpos;
-    write_record_ns(&newpos, outend, "", offset, CLASS_IN, 0, opt->ns);
+    for (size_t i = 0; i < zone->ns.size(); ++i) {
+      if (write_record_ns(&newpos, outend, "", offset, CLASS_IN, 0, zone->ns[i].c_str()) != 0)
+        break;
+    }
     max_auth_size = newpos - outpos;
 
     newpos = outpos;
-    write_record_soa(&newpos, outend, "", offset, CLASS_IN, opt->nsttl, opt->ns, opt->mbox, time(NULL), 604800, 86400, 2592000, 604800);
+    write_record_soa(&newpos, outend, "", offset, CLASS_IN, opt->nsttl, ns_host, mbox, time(NULL), 604800, 86400, 2592000, 604800);
     if (max_auth_size < newpos - outpos)
         max_auth_size = newpos - outpos;
 //    printf("Authority section will claim %i bytes max\n", max_auth_size);
@@ -340,16 +372,19 @@ ssize_t static dnshandle(dns_opt_t *opt, const unsigned char *inbuf, size_t insi
 
   int have_ns = 0;
 
-  // NS records
+  // NS records — one RR per configured NS hostname.
   if ((typ == TYPE_NS || typ == QTYPE_ANY) && (cls == CLASS_IN || cls == QCLASS_ANY)) {
-    int ret2 = write_record_ns(&outpos, outend - max_auth_size, "", offset, CLASS_IN, opt->nsttl, opt->ns);
-//    printf("wrote NS record: %i\n", ret2);
-    if (!ret2) { outbuf[7]++; have_ns++; }
+    for (size_t i = 0; i < zone->ns.size(); ++i) {
+      int ret2 = write_record_ns(&outpos, outend - max_auth_size, "", offset, CLASS_IN, opt->nsttl, zone->ns[i].c_str());
+      if (ret2) break; // out of space — stop, what we already wrote stays
+      outbuf[7]++;
+      have_ns++;
+    }
   }
 
   // SOA records
-  if ((typ == TYPE_SOA || typ == QTYPE_ANY) && (cls == CLASS_IN || cls == QCLASS_ANY) && opt->mbox) {
-    int ret2 = write_record_soa(&outpos, outend - max_auth_size, "", offset, CLASS_IN, opt->nsttl, opt->ns, opt->mbox, time(NULL), 604800, 86400, 2592000, 604800);
+  if ((typ == TYPE_SOA || typ == QTYPE_ANY) && (cls == CLASS_IN || cls == QCLASS_ANY) && !zone->mbox.empty()) {
+    int ret2 = write_record_soa(&outpos, outend - max_auth_size, "", offset, CLASS_IN, opt->nsttl, ns_host, mbox, time(NULL), 604800, 86400, 2592000, 604800);
 //    printf("wrote SOA record: %i\n", ret2);
     if (!ret2) { outbuf[7]++; }
   }
@@ -376,9 +411,11 @@ ssize_t static dnshandle(dns_opt_t *opt, const unsigned char *inbuf, size_t insi
   
   // Authority section
   if (!have_ns && outbuf[7]) {
-    int ret2 = write_record_ns(&outpos, outend, "", offset, CLASS_IN, opt->nsttl, opt->ns);
-//    printf("wrote NS record: %i\n", ret2);
-    if (!ret2) {
+    // Emit the full NS RRset so resolvers performing HA failover learn
+    // about every nameserver, not just ns[0].
+    for (size_t i = 0; i < zone->ns.size(); ++i) {
+      int ret2 = write_record_ns(&outpos, outend, "", offset, CLASS_IN, opt->nsttl, zone->ns[i].c_str());
+      if (ret2) break;
       outbuf[9]++;
     }
   }
@@ -387,14 +424,21 @@ ssize_t static dnshandle(dns_opt_t *opt, const unsigned char *inbuf, size_t insi
     // response. If we replied with NS above we'd create a bad horizontal
     // referral loop, as the NS response indicates where the resolver should
     // try next.
-    int ret2 = write_record_soa(&outpos, outend, "", offset, CLASS_IN, opt->nsttl, opt->ns, opt->mbox, time(NULL), 604800, 86400, 2592000, 604800);
+    int ret2 = write_record_soa(&outpos, outend, "", offset, CLASS_IN, opt->nsttl, ns_host, mbox, time(NULL), 604800, 86400, 2592000, 604800);
 //    printf("wrote SOA record: %i\n", ret2);
     if (!ret2) { outbuf[9]++; }
   }
   
   // set AA
   outbuf[2] |= 4;
-  
+
+  // Update statistics: count this query as "answered" if we managed to
+  // include at least one record (in either the answer or the authority
+  // section). Plain NXDOMAIN-style replies with only the SOA in the
+  // authority section also count as answered — what we don't count are
+  // FORMERR / REFUSED replies (those bumped a Refused* counter above).
+  if (outbuf[7] || outbuf[9]) opt->nAnswered++;
+
   return outpos - outbuf;
 }
 
@@ -426,8 +470,19 @@ int dnsserver(dns_opt_t *opt) {
     si_me.sin6_family = AF_INET6;
     si_me.sin6_port = htons(opt->port);
     inet_pton(AF_INET6, opt->addr, &si_me.sin6_addr);
-    if (bind(listenSocket, (struct sockaddr*)&si_me, sizeof(si_me))==-1)
+    if (bind(listenSocket, (struct sockaddr*)&si_me, sizeof(si_me))==-1) {
+      // Make this loud. Pre-existing code returned -2 silently, which
+      // meant a failed bind (typically EACCES on port < 1024 when
+      // running as a non-root user without CAP_NET_BIND_SERVICE, or
+      // EADDRINUSE if systemd-resolved or another resolver is already
+      // bound) caused all DNS threads to exit while the rest of the
+      // process happily kept running, masking the fault. We now log
+      // strerror() so the journal makes the cause obvious.
+      fprintf(stderr, "ERROR: bind UDP %s:%d failed: %s\n",
+              opt->addr ? opt->addr : "::", opt->port, strerror(errno));
+      fflush(stderr);
       return -2;
+    }
   }
   
   unsigned char inbuf[BUFLEN], outbuf[BUFLEN];

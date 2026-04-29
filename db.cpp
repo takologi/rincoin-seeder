@@ -4,6 +4,11 @@
 using namespace std;
 
 int nMinimumHeight = 0;
+// 0 = "no cutoff configured". main() sets the appropriate default
+// (mainnet 840000, testnet 4200, regtest 600) and `--customizedhalvingheight`
+// can override it. Declared in db.h.
+int nCustomizedHalvingHeight = 0;
+std::atomic<int> nBestSeenHeight{0};
 
 void CAddrInfo::Update(bool good) {
   uint32_t now = time(NULL);

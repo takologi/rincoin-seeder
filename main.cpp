@@ -9,7 +9,7 @@
 #include <getopt.h>
 #include <atomic>
 
-#include "bitcoin.h"
+#include "rincoin.h"
 #include "db.h"
 
 using namespace std;
@@ -22,13 +22,28 @@ public:
   int nPort;
   int nP2Port;
   int nMinimumHeight;
+  // Activation height of the customized halving on the network being
+  // crawled. -1 means "use the per-network default" (mainnet 840000,
+  // testnet 4200, regtest 600 — picked at parse time once we know
+  // whether --testnet was passed). 0 disables the cutoff entirely.
+  // Anything > 0 is taken as an explicit override from
+  // --customizedhalvingheight. See db.h::IsCustomizedHalvingEnforced().
+  int nCustomizedHalvingHeightOpt;
   int nDnsThreads;
   int fUseTestNet;
   int fWipeBan;
   int fWipeIgnore;
-  const char *mbox;
-  const char *ns;
-  const char *host;
+  // Multi-zone configuration. The seeder can be authoritative for several
+  // FQDNs at once (e.g. seed.rincoin.net, seed.rincoin.org, seed.rin.so)
+  // through the single privileged UDP/53 socket. The three vectors below
+  // are kept index-aligned: zoneHosts[i] is served with zoneNs[i] / zoneMbox[i].
+  // Populated from the -h / -n / -m options (each may be repeated).
+  // zoneNs[i] is itself a comma-separated list of NS hostnames so that a
+  // single zone can advertise multiple nameservers (HA). The first entry
+  // becomes the SOA MNAME; all entries are emitted as NS RRs.
+  std::vector<std::string> zoneHosts;
+  std::vector<std::vector<std::string>> zoneNs;
+  std::vector<std::string> zoneMbox;
   const char *tor;
   const char *ip_addr;
   const char *ipv4_proxy;
@@ -37,17 +52,24 @@ public:
   std::vector<string> vSeeds;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), nCustomizedHalvingHeightOpt(-1), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
 
   void ParseCommandLine(int argc, char **argv) {
-    static const char *help = "Bitcoin-seeder\n"
-                              "Usage: %s -h <host> -n <ns> [-m <mbox>] [-t <threads>] [-p <port>]\n"
+    static const char *help = "Rincoin community seeder\n"
+                              "Usage: %s -h <host> -n <ns> -m <mbox> [-h <host2> -n <ns2> -m <mbox2> ...] [-t <threads>] [-p <port>]\n"
                               "\n"
                               "Options:\n"
-                              "-s <seed>       Seed node to collect peers from (replaces default)\n"
-                              "-h <host>       Hostname of the DNS seed\n"
-                              "-n <ns>         Hostname of the nameserver\n"
-                              "-m <mbox>       E-Mail address reported in SOA records\n"
+                              "-s <seed>       Seed node to collect peers from (replaces default; may repeat)\n"
+                              "-h <host>       Hostname of the DNS seed (FQDN). Repeat -h together with -n / -m\n"
+                              "                to serve more than one zone from a single process. The N-th -h\n"
+                              "                pairs with the N-th -n and the N-th -m, so the order matters.\n"
+                              "-n <ns>         Hostname of the nameserver returned in NS / SOA records.\n"
+                              "                Must be supplied once per -h. Pass a comma-separated list\n"
+                              "                (e.g. ns1.example.com,ns2.example.com) to advertise more\n"
+                              "                than one NS record for the same zone (HA setups). The\n"
+                              "                first entry is used as the SOA MNAME.\n"
+                              "-m <mbox>       E-Mail address reported in SOA records (replace '@' with '.').\n"
+                              "                Must be supplied once per -h.\n"
                               "-t <threads>    Number of crawlers to run in parallel (default 96)\n"
                               "-d <threads>    Number of DNS server threads (default 4)\n"
                               "-a <address>    Address to listen on (default ::)\n"
@@ -59,10 +81,24 @@ public:
                               "--p2port <port> P2P port to connect to\n"
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
+                              "--customizedhalvingheight <n>\n"
+                              "                Activation height of Rincoin's customized halving on the\n"
+                              "                network being crawled. Once the seeder has observed any\n"
+                              "                peer reporting a tip at or beyond this height, peers still\n"
+                              "                announcing protocol < 70018 will be marked not-good and\n"
+                              "                stop appearing in DNS answers (mirrors Rincoin Core's\n"
+                              "                MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION enforcement).\n"
+                              "                Defaults: mainnet 840000, testnet 4200, regtest 600.\n"
+                              "                Pass 0 to disable the cutoff entirely.\n"
                               "--testnet       Use testnet\n"
                               "--wipeban       Wipe list of banned nodes\n"
                               "--wipeignore    Wipe list of ignored nodes\n"
                               "-?, --help      Show this text\n"
+                              "\n"
+                              "Multi-zone example:\n"
+                              "  %s -h seed.rincoin.net -n ns.example.com -m admin.example.com \\\n"
+                              "     -h seed.rincoin.org -n ns.example.com -m admin.example.com \\\n"
+                              "     -h seed.rin.so      -n ns.example.com -m admin.example.com\n"
                               "\n";
     bool showHelp = false;
 
@@ -83,10 +119,13 @@ public:
         {"p2port", required_argument, 0, 'b'},
         {"magic", required_argument, 0, 'q'},
         {"minheight", required_argument, 0, 'x'},
+        // Long-only options use values >= 256 so they never collide with
+        // the short-option char range used by getopt_long().
+        {"customizedhalvingheight", required_argument, 0, 256},
         {"testnet", no_argument, &fUseTestNet, 1},
         {"wipeban", no_argument, &fWipeBan, 1},
         {"wipeignore", no_argument, &fWipeBan, 1},
-        {"help", no_argument, 0, 'h'},
+        {"help", no_argument, 0, '?'},
         {0, 0, 0, 0}
       };
       int option_index = 0;
@@ -99,17 +138,33 @@ public:
         }
 
         case 'h': {
-          host = optarg;
+          // Append a new zone host. The matching -n / -m must follow
+          // (any order, but each -h needs its own -n and -m for
+          // validation to pass below).
+          zoneHosts.emplace_back(optarg);
           break;
         }
-        
+
         case 'm': {
-          mbox = optarg;
+          zoneMbox.emplace_back(optarg);
           break;
         }
-        
+
         case 'n': {
-          ns = optarg;
+          // Split comma-separated list. Empty fragments and whitespace
+          // are skipped so that trailing commas / accidental spaces
+          // don't produce bogus NS entries.
+          std::vector<std::string> nslist;
+          const char *p = optarg;
+          while (*p) {
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            const char *start = p;
+            while (*p && *p != ',') p++;
+            const char *end = p;
+            while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            if (end > start) nslist.emplace_back(start, end - start);
+          }
+          zoneNs.emplace_back(std::move(nslist));
           break;
         }
         
@@ -198,6 +253,18 @@ public:
           break;
         }
 
+        case 256: {
+          // --customizedhalvingheight. Accept 0 (explicitly disable) and
+          // any positive int up to INT_MAX. Negative values are silently
+          // ignored (treated as "keep the default").
+          char *end = NULL;
+          long n = strtol(optarg, &end, 10);
+          if (end != optarg && n >= 0 && n <= 0x7fffffff) {
+            nCustomizedHalvingHeightOpt = (int)n;
+          }
+          break;
+        }
+
         case '?': {
           showHelp = true;
           break;
@@ -231,8 +298,28 @@ public:
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2);                    // x1000c08
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2 | NODE_COMPACT_FILTERS); // x1000c48
     }
-    if (host != NULL && ns == NULL) showHelp = true;
-    if (showHelp) fprintf(stderr, help, argv[0]);
+    // Multi-zone validation: -h, -n, -m must each be supplied the same
+    // number of times. The N-th -h is paired with the N-th -n / -m. If
+    // any -h is given without a matching -n / -m (or vice versa) we
+    // print help and let main() bail out below when it notices the
+    // empty zone vector.
+    if (zoneHosts.size() != zoneNs.size() || zoneHosts.size() != zoneMbox.size()) {
+      fprintf(stderr, "Error: each -h must be matched by exactly one -n and one -m "
+                      "(got %zu host(s), %zu ns, %zu mbox).\n",
+              zoneHosts.size(), zoneNs.size(), zoneMbox.size());
+      showHelp = true;
+    }
+    // Each -n value, after comma-splitting, must yield at least one
+    // non-empty NS hostname. Catches typos like `-n ,` or `-n ""`
+    // before they reach the DNS thread.
+    for (size_t i = 0; i < zoneNs.size(); ++i) {
+      if (zoneNs[i].empty()) {
+        fprintf(stderr, "Error: -n for zone #%zu (%s) yielded no NS hostnames.\n",
+                i, i < zoneHosts.size() ? zoneHosts[i].c_str() : "?");
+        showHelp = true;
+      }
+    }
+    if (showHelp) fprintf(stderr, help, argv[0], argv[0]);
   }
 };
 
@@ -328,40 +415,90 @@ public:
   }
 
   CDnsThread(CDnsSeedOpts* opts, int idIn) : id(idIn) {
-    dns_opt.host = opts->host;
-    dns_opt.ns = opts->ns;
-    dns_opt.mbox = opts->mbox;
+    // Build per-thread dns_opt_t. The zones vector is shared
+    // structurally (same content) between every DNS thread; each thread
+    // keeps its own copy so its statistics counters can be updated
+    // without locking.
+    dns_opt.zones.clear();
+    dns_opt.zones.reserve(opts->zoneHosts.size());
+    for (size_t i = 0; i < opts->zoneHosts.size(); ++i) {
+      dns_zone_t z;
+      z.host = opts->zoneHosts[i];
+      z.ns   = opts->zoneNs[i];
+      z.mbox = opts->zoneMbox[i];
+      dns_opt.zones.push_back(z);
+    }
     dns_opt.datattl = 3600;
     dns_opt.nsttl = 40000;
     dns_opt.cb = GetIPList;
     dns_opt.addr = opts->ip_addr;
     dns_opt.port = opts->nPort;
     dns_opt.nRequests = 0;
+    dns_opt.nAnswered = 0;
+    dns_opt.nRefusedNoZone = 0;
+    dns_opt.nRefusedBadFilter = 0;
+    dns_opt.nRefusedFormat = 0;
     dbQueries = 0;
     perflag.clear();
     filterWhitelist = opts->filter_whitelist;
   }
 
   void run() {
-    dnsserver(&dns_opt);
+    // dnsserver() runs forever in the normal case. Any return value
+    // means the thread is giving up, which historically went silent and
+    // looked indistinguishable from a healthy seeder. Make it loud so
+    // systemd / journald show the cause (typically a failed bind on
+    // privileged port 53 \u2014 see dns.cpp for the underlying message).
+    int rv = dnsserver(&dns_opt);
+    fprintf(stderr, "ERROR: DNS thread #%d exiting (dnsserver returned %d) \u2014"
+                    " no further DNS responses from this thread on port %d\n",
+            id, rv, dns_opt.port);
+    fflush(stderr);
   }
 };
 
 extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int max, int ipv4, int ipv6) {
   CDnsThread *thread = (CDnsThread*)data;
 
+  // Two accepted query name forms:
+  //   1) "<zone>"            — return random IPs from the global cache
+  //   2) "xHHHH.<zone>"      — return random IPs whose service flags
+  //                             equal the hex bitmask HHHH (must be
+  //                             whitelisted via -w / built-in defaults)
+  // In both cases <zone> must be one of the configured -h hosts. The
+  // suffix match is case insensitive. dnshandle() in dns.cpp has
+  // already verified the suffix matches *some* configured zone, but
+  // GetIPList re-validates because it also has to extract the prefix.
   uint64_t requestedFlags = 0;
   int hostlen = strlen(requestedHostname);
+  const char *suffix = requestedHostname; // pointer to "<zone>" portion
   if (hostlen > 1 && requestedHostname[0] == 'x' && requestedHostname[1] != '0') {
     char *pEnd;
     uint64_t flags = (uint64_t)strtoull(requestedHostname+1, &pEnd, 16);
-    if (*pEnd == '.' && pEnd <= requestedHostname+17 && std::find(thread->filterWhitelist.begin(), thread->filterWhitelist.end(), flags) != thread->filterWhitelist.end())
+    if (*pEnd == '.' && pEnd <= requestedHostname+17 &&
+        std::find(thread->filterWhitelist.begin(), thread->filterWhitelist.end(), flags) != thread->filterWhitelist.end()) {
       requestedFlags = flags;
-    else
+      suffix = pEnd + 1;
+    } else {
+      // Either the hex parse failed, the prefix overflowed 16 hex
+      // digits, or the requested service-flag combination is not in
+      // the whitelist. Bump the dedicated counter so monitoring can
+      // distinguish "scanner probing arbitrary flag combos" from
+      // "client asked for a zone we don't serve".
+      thread->dns_opt.nRefusedBadFilter++;
       return 0;
+    }
   }
-  else if (strcasecmp(requestedHostname, thread->dns_opt.host))
-    return 0;
+  // Validate the suffix against every configured zone.
+  bool matched = false;
+  for (size_t z = 0; z < thread->dns_opt.zones.size(); ++z) {
+    if (strcasecmp(suffix, thread->dns_opt.zones[z].host.c_str()) == 0) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) return 0;
+
   thread->cacheHit(requestedFlags);
   auto& thisflag = thread->perflag[requestedFlags];
   unsigned int size = thisflag.cache.size();
@@ -465,12 +602,29 @@ extern "C" void* ThreadStats(void*) {
       printf("\x1b[2K\x1b[u");
     printf("\x1b[s");
     uint64_t requests = 0;
+    uint64_t answered = 0;
+    uint64_t refusedNoZone = 0;
+    uint64_t refusedBadFilter = 0;
+    uint64_t refusedFormat = 0;
     uint64_t queries = 0;
     for (unsigned int i=0; i<dnsThread.size(); i++) {
-      requests += dnsThread[i]->dns_opt.nRequests;
-      queries += dnsThread[i]->dbQueries;
+      requests         += dnsThread[i]->dns_opt.nRequests;
+      answered         += dnsThread[i]->dns_opt.nAnswered;
+      refusedNoZone    += dnsThread[i]->dns_opt.nRefusedNoZone;
+      refusedBadFilter += dnsThread[i]->dns_opt.nRefusedBadFilter;
+      refusedFormat    += dnsThread[i]->dns_opt.nRefusedFormat;
+      queries          += dnsThread[i]->dbQueries;
     }
-    printf("%s %i/%i available (%i tried in %is, %i new, %i active), %i banned; %llu DNS requests, %llu db queries", c, stats.nGood, stats.nAvail, stats.nTracked, stats.nAge, stats.nNew, stats.nAvail - stats.nTracked - stats.nNew, stats.nBanned, (unsigned long long)requests, (unsigned long long)queries);
+    printf("%s %i/%i available (%i tried in %is, %i new, %i active), %i banned; "
+           "DNS req=%llu ans=%llu refusedZone=%llu refusedFilter=%llu refusedFormat=%llu db=%llu",
+           c, stats.nGood, stats.nAvail, stats.nTracked, stats.nAge, stats.nNew,
+           stats.nAvail - stats.nTracked - stats.nNew, stats.nBanned,
+           (unsigned long long)requests,
+           (unsigned long long)answered,
+           (unsigned long long)refusedNoZone,
+           (unsigned long long)refusedBadFilter,
+           (unsigned long long)refusedFormat,
+           (unsigned long long)queries);
     Sleep(1000);
   } while(1);
   return nullptr;
@@ -564,6 +718,26 @@ int main(int argc, char **argv) {
     printf("Using minimum height %i\n", opts.nMinimumHeight);
     nMinimumHeight = opts.nMinimumHeight;
   }
+  // Resolve the customized-halving cutoff once we know the network. The
+  // defaults mirror Rincoin Core's `nCustomizedHalvingPhase4StartHeight`
+  // (= 4 * nSubsidyHalvingInterval) from src/chainparams.cpp:
+  //   mainnet: 4 * 210000 = 840000
+  //   testnet: 4 *   1050 =   4200
+  //   regtest: 4 *    150 =    600   (never reached by --testnet here)
+  // 0 explicitly disables the cutoff. -1 (the default opt value) means
+  // "use the per-network default".
+  if (opts.nCustomizedHalvingHeightOpt >= 0) {
+      nCustomizedHalvingHeight = opts.nCustomizedHalvingHeightOpt;
+  } else {
+      nCustomizedHalvingHeight = opts.fUseTestNet ? 4200 : 840000;
+  }
+  if (nCustomizedHalvingHeight > 0) {
+    printf("Customized halving cutoff: %i (peers with proto<70018 will be"
+           " demoted once any crawled peer reports a tip >= this height)\n",
+           nCustomizedHalvingHeight);
+  } else {
+    printf("Customized halving cutoff: disabled\n");
+  }
   if (!opts.vSeeds.empty()) {
     printf("Overriding DNS seeds\n");
     swap(opts.vSeeds, vSeeds);
@@ -572,18 +746,15 @@ int main(int argc, char **argv) {
       vSeeds.emplace_back(seeds[i]);
     }
   }
-  if (!opts.ns) {
-    printf("No nameserver set. Not starting DNS server.\n");
+  if (opts.zoneHosts.empty()) {
+    // No -h given at all → run as a pure crawler with no DNS server.
+    // Useful for warm-starting the database or for monitoring-only setups.
+    printf("No DNS zone configured (-h). Not starting DNS server.\n");
     fDNS = false;
   }
-  if (fDNS && !opts.host) {
-    fprintf(stderr, "No hostname set. Please use -h.\n");
-    exit(1);
-  }
-  if (fDNS && !opts.mbox) {
-    fprintf(stderr, "No e-mail address set. Please use -m.\n");
-    exit(1);
-  }
+  // The earlier ParseCommandLine() validation guarantees that
+  // zoneHosts.size() == zoneNs.size() == zoneMbox.size(), so we don't
+  // need to re-check the individual vectors here.
   FILE *f = fopen("dnsseed.dat","r");
   if (f) {
     printf("Loading dnsseed.dat...");
@@ -597,7 +768,20 @@ int main(int argc, char **argv) {
   }
   pthread_t threadDns, threadSeed, threadDump, threadStats;
   if (fDNS) {
-    printf("Starting %i DNS threads for %s on %s (port %i)...", opts.nDnsThreads, opts.host, opts.ns, opts.nPort);
+    printf("Starting %i DNS threads on port %i for %zu zone(s):\n",
+           opts.nDnsThreads, opts.nPort, opts.zoneHosts.size());
+    for (size_t z = 0; z < opts.zoneHosts.size(); ++z) {
+      // Join zoneNs[z] for the banner so operators can confirm at a
+      // glance that all NS hostnames they passed via comma-list landed.
+      std::string nsjoined;
+      for (size_t j = 0; j < opts.zoneNs[z].size(); ++j) {
+        if (j) nsjoined += ",";
+        nsjoined += opts.zoneNs[z][j];
+      }
+      printf("  zone[%zu]: host=%s ns=%s mbox=%s\n",
+             z, opts.zoneHosts[z].c_str(),
+             nsjoined.c_str(), opts.zoneMbox[z].c_str());
+    }
     dnsThread.clear();
     for (int i=0; i<opts.nDnsThreads; i++) {
       dnsThread.push_back(new CDnsThread(&opts, i));

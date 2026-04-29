@@ -1,8 +1,14 @@
-bitcoin-seeder
+rincoin-seeder
 ==============
 
-Bitcoin-seeder is a crawler for the Bitcoin network, which exposes a list
-of reliable nodes via a built-in DNS server.
+Rincoin-seeder is a crawler for the Rincoin network, which exposes a
+list of reliable nodes via a built-in DNS server.
+
+It is the Rincoin community fork of Pieter Wuille's `bitcoin-seeder`
+(the upstream library/codebase name is preserved in copyright lines
+and a few internal comments). It is wire-compatible with the original
+protocol but ships with the Rincoin defaults and a few extras
+described below.
 
 Features:
 * regularly revisits known nodes to check their availability
@@ -13,6 +19,15 @@ Features:
   1 day and 1 week, to base decisions on.
 * very low memory (a few tens of megabytes) and cpu requirements.
 * crawlers run in parallel (by default 24 threads simultaneously).
+* serves multiple DNS zones from a single process / single UDP/53
+  socket (e.g. `seed.rincoin.net`, `seed.rincoin.org`, `seed.rin.so`).
+* announces protocol version 70018 + subver
+  `/rincoin-community-seeder:2.0.0/`, so it survives the customized
+  halving activation that disconnects peers below `MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION`.
+* exposes per-thread DNS counters (`nRequests`, `nAnswered`,
+  `nRefusedNoZone`, `nRefusedBadFilter`, `nRefusedFormat`) and
+  per-second stats output suitable for monitoring (Zabbix / Prometheus
+  via a small text-exporter wrapper).
 
 REQUIREMENTS
 ------------
@@ -33,10 +48,184 @@ dnsseed.example.com.   86400    IN      NS     vps.example.com.
 
 On the system vps.example.com, you can now run dnsseed:
 
-./dnsseed -h dnsseed.example.com -n vps.example.com
+./dnsseed -h dnsseed.example.com -n vps.example.com -m admin.example.com
 
 If you want the DNS server to report SOA records, please provide an
-e-mail address (with the @ part replaced by .) using -m.
+e-mail address (with the @ part replaced by .) using -m. Each `-h`
+must be paired with one `-n` and one `-m`.
+
+MULTI-ZONE OPERATION
+--------------------
+
+A single seeder process can be authoritative for several DNS zones at
+once, sharing one privileged UDP/53 socket and one crawler database.
+This is useful when you want to publish the same set of crawl results
+under multiple seed FQDNs without running (and hardening, monitoring,
+draining, ...) several daemons.
+
+Repeat `-h`, `-n` and `-m` once per zone. The N-th `-h` is paired with
+the N-th `-n` and the N-th `-m`, so the order matters:
+
+  ./dnsseed \
+      -h seed.rincoin.net -n ns.example.com -m admin.example.com \
+      -h seed.rincoin.org -n ns.example.com -m admin.example.com \
+      -h seed.rin.so      -n ns.example.com -m admin.example.com
+
+For each configured zone, set up an `NS` record at the parent domain
+pointing at the host where dnsseed is running. Verify with:
+
+  $ dig @<seeder-ip> -p 53 NS  seed.rincoin.net
+  $ dig @<seeder-ip> -p 53 SOA seed.rincoin.org
+  $ dig @<seeder-ip> -p 53 A   seed.rin.so
+
+Queries for any name *not* matching one of the configured zones are
+answered with DNS RCODE 5 (REFUSED) and counted under the
+`refusedZone` statistic so they are visible in the per-second log
+line.
+
+The well-known service-flag prefix form `xHHHH.<zone>` (e.g.
+`x9.seed.rincoin.net` for `NODE_NETWORK | NODE_WITNESS`) works
+identically across every configured zone. The set of accepted hex
+masks is controlled by the built-in defaults and / or `-w`.
+
+PROTOCOL VERSION & SUBVER
+-------------------------
+
+The seeder advertises `PROTOCOL_VERSION = 70018` (the Rincoin
+`CUSTOMIZED_HALVING_VERSION`) and the subver string
+`/rincoin-community-seeder:2.0.0/`. Both are defined at compile time
+in `serialize.h` and `rincoin.cpp` respectively.
+
+Why 70018:
+  Rincoin Core's `net_processing.cpp` disconnects any peer announcing
+  a `version < MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION (= 70018)`
+  once the customized halving has activated on the active chain. A
+  seeder that still announced the legacy `60000` would be unable to
+  finish version negotiation, would never receive `addr` messages,
+  and the database would slowly rot until `IsGood()` rejects every
+  entry. Bumping unconditionally is safe — pre-upgrade peers only
+  enforce `nVersion >= MIN_PEER_PROTO_VERSION (= 31800)`.
+
+If a future protocol bump happens, edit `PROTOCOL_VERSION` in
+`serialize.h` and the subver string in `rincoin.cpp::PushVersion()`.
+
+CUSTOMIZED HALVING ENFORCEMENT
+------------------------------
+
+Rincoin Core (`src/version.h`) defines
+`MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION = 70018`. Once the active
+chain reaches `nCustomizedHalvingPhase4StartHeight` (mainnet 840000,
+testnet 4200, regtest 600), Rincoin nodes refuse any peer that still
+announces a protocol version below 70018. The seeder mirrors that
+policy:
+
+  1.  Every successful `TestNode()` updates a global high-water mark
+      `nBestSeenHeight` with the peer's reported `nStartingHeight`.
+  2.  `CAddrInfo::IsGood()` (db.h) treats a peer as not-good — and
+      therefore never includes it in DNS answers — when
+      `nBestSeenHeight >= nCustomizedHalvingHeight` AND the peer's
+      `clientVersion < 70018`.
+  3.  Such peers are *not* banned. They keep being crawled, so an
+      operator who later upgrades is re-listed automatically on the
+      next successful test cycle without having to wait out a ban
+      window.
+
+The activation height defaults to the per-network value above and
+can be overridden with the `--customizedhalvingheight <N>` flag.
+Pass `0` to disable the cutoff entirely (useful for private testnets
+that never activate the upgrade). The current value is printed at
+startup right after the network banner.
+
+The cutoff only kicks in *after* the seeder has actually observed
+the network crossing the activation height, so a freshly-started
+seeder on a stale database does not immediately wipe its peer list
+on the strength of an arbitrary configured number.
+
+DEPLOYMENT NOTES
+----------------
+
+Two things bite operators every time:
+
+1.  **Privileged port (UDP/53).** The seeder needs to bind a port
+    < 1024. Either run as root, or grant the unit the right capability:
+
+        [Service]
+        AmbientCapabilities=CAP_NET_BIND_SERVICE
+        CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+    Without this, every DNS thread fails its `bind()` and exits with
+    `Permission denied`. The error is now logged loudly to stderr —
+    check `journalctl -u <unit>` if the seeder appears to be running
+    but `dig` times out / returns SERVFAIL.
+
+2.  **Conflict with `systemd-resolved`.** On most modern distros
+    `systemd-resolved` is bound to `127.0.0.53:53` and `127.0.0.54:53`.
+    The seeder defaults to listening on the IPv6 wildcard `[::]:53`,
+    which on Linux *overlaps* every local IPv4 address — including the
+    `127.0.0.5x` stubs — and the kernel rejects the bind with
+    `Address already in use`.
+
+    The fix is to bind to your public IP explicitly:
+
+        ExecStart=/var/rinseed/dnsseed -a <public-ip> ...
+
+    Don't disable `systemd-resolved` unless you know what else on the
+    box depends on it. If you also need IPv6 service, run a second
+    seeder process with `-a <public-ipv6>`; the upstream code only
+    supports a single `-a`.
+
+3.  **In-bailiwick NS glue.** If you delegate `seed.example.net` to
+    `ns1.seed.example.net`, the parent zone (`example.net`) must
+    publish glue A/AAAA records for those names — otherwise resolvers
+    can't bootstrap the lookup. The simpler alternative is to use
+    *out-of-bailiwick* NS hostnames, e.g. `ns1-seed.example.net`,
+    which only need plain A records in the parent zone.
+
+MONITORING
+----------
+
+The seeder writes a single status line per second to stdout:
+
+  [yy-mm-dd HH:MM:SS] G/A available (T tried in S s, N new, X active),
+                      B banned;
+                      DNS req=R ans=AN refusedZone=Z refusedFilter=F
+                      refusedFormat=O db=Q
+
+Fields:
+  G   nGood            — entries currently considered "good" (advertised)
+  A   nAvail           — total entries known and not banned
+  T   nTracked         — entries tested in the last window
+  S   nAge             — age of the oldest tracked entry, seconds
+  N   nNew             — entries discovered but not yet tested
+  X   nAvail-T-N       — entries currently being crawled
+  B   nBanned          — banned entries
+  R   nRequests        — total UDP DNS datagrams received
+  AN  nAnswered        — replies that included at least one RR
+  Z   nRefusedNoZone   — query name did not match any configured zone
+  F   nRefusedBadFilter— `xHHHH.<zone>` mask was not in the whitelist
+                          (returned NOERROR with empty answer section)
+  O   nRefusedFormat   — malformed packet / bad opcode / multi-question
+  Q   db               — internal cache misses against the address DB
+
+The same counters are exposed via the in-memory `dns_opt_t` struct in
+each DNS thread, so a Prometheus text-exporter or a Zabbix
+UserParameter can scrape them by either:
+  * tailing stdout (simplest), or
+  * extending `ThreadStats` to also write a machine-readable line to a
+    file / unix socket.
+
+A separate `dnsstats.log` is appended once per dump cycle with the
+aggregated reliability windows; see `dnsseed.dump` for the per-IP
+breakdown (good flag, last success, uptime%, height, services, ver,
+subver). All three files are simple text and easy to parse.
+
+For external probing, any DNS resolver is enough:
+
+  dig @<seeder-ip> -p 53 +short A    seed.rincoin.net | wc -l
+  dig @<seeder-ip> -p 53 +short AAAA seed.rincoin.net | wc -l
+
+A successful query that returns at least one address is the most
+reliable single-shot liveness check.
 
 COMPILING
 ---------
@@ -58,7 +247,7 @@ issue DNS requests directly. Example:
 
 $ dig @:: -p 15353 dnsseed.example.com
        ^       ^    ^
-       |       |    |__ Should match the host (-h) argument supplied to dnsseed
+       |       |    |__ Should match one of the -h hosts supplied to dnsseed
        |       |
        |       |_______ Port number (example uses the user space port; see below)
        |
