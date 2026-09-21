@@ -27,6 +27,10 @@
 #define MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION 70018
 
 extern int nMinimumHeight;
+// --preferversion: when non-zero, DNS answers are filled from good nodes that
+// announce at least this protocol version first (see CAddrDb::GetIPs_()). Nodes
+// below it are never excluded, they only come second. 0 (the default) = off.
+extern int nPreferVersion;
 // Activation height of the customized halving on the network the seeder
 // is crawling. Set by main() based on --testnet / --customizedhalvingheight.
 // 0 disables the check entirely (useful for regtest / private networks

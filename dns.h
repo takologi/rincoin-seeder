@@ -19,8 +19,8 @@ struct addr_t {
 // own SOA mailbox (`mbox`) and one *or more* NS hostnames (`ns`). All
 // zones share the same crawler database, so adding a zone is essentially
 // free — it just lets a single seeder process answer queries for
-// several FQDNs (e.g. `seed.rincoin.net`, `seed.rincoin.org`,
-// `seed.rin.so`) on the single privileged UDP/53 socket.
+// several FQDNs (e.g. `seed.rincoin.tech`, `seed.second.domain.org`,
+// `seed.otherdomain.net`) on the single privileged UDP/53 socket.
 //
 // The first entry of `ns` is used as the SOA MNAME (per RFC 1035 the
 // SOA can only name a single primary master). All entries are emitted

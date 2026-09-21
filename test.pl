@@ -7,10 +7,12 @@ use IO::Socket;
 use strict;
 
 # DNS labels making up the seed FQDN to flood with queries during the
-# load test. Was bitcoin-seeder's seed.bitcoin.sipa.be; switched to the
-# rincoin production zone. Edit if you point your seeder at a different
-# zone via -h.
-my @dom = ("seed","rincoin","net");
+# load test. Edit if you point your seeder at a different zone via -h.
+my @dom = ("seed","rincoin","tech");
+
+# The server to flood. This is a load test: point it at your own seeder
+# only, never at somebody else's.
+my $server = "127.0.0.1";
 
 my $run :shared = 1;
 
@@ -22,7 +24,7 @@ sub go {
   my $sock = IO::Socket::INET->new(
     Proto    => 'udp',
     PeerPort => 53,
-    PeerAddr => "vps.sipa.be",
+    PeerAddr => $server,
   ) or die "Could not create socket: $!\n";
 
   while($run) {

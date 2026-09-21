@@ -20,10 +20,12 @@ Features:
 * very low memory (a few tens of megabytes) and cpu requirements.
 * crawlers run in parallel (by default 24 threads simultaneously).
 * serves multiple DNS zones from a single process / single UDP/53
-  socket (e.g. `seed.rincoin.net`, `seed.rincoin.org`, `seed.rin.so`).
-* announces protocol version 70018 + subver
-  `/rincoin-community-seeder:2.0.0/`, so it survives the customized
-  halving activation that disconnects peers below `MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION`.
+  socket (e.g. `seed.rincoin.tech`, `seed.second.domain.org`,
+  `seed.otherdomain.net`).
+* announces protocol version 70019 + subver
+  `/RincoinCommunitySeeder:2.1.0/`, in line with Rincoin Community
+  Core 1.2.0, and so stays above the peer protocol floor (70018) that
+  the nodes enforce from the height-840,000 transition on.
 * exposes per-thread DNS counters (`nRequests`, `nAnswered`,
   `nRefusedNoZone`, `nRefusedBadFilter`, `nRefusedFormat`) and
   per-second stats output suitable for monitoring (Zabbix / Prometheus
@@ -67,16 +69,20 @@ Repeat `-h`, `-n` and `-m` once per zone. The N-th `-h` is paired with
 the N-th `-n` and the N-th `-m`, so the order matters:
 
   ./dnsseed \
-      -h seed.rincoin.net -n ns.example.com -m admin.example.com \
-      -h seed.rincoin.org -n ns.example.com -m admin.example.com \
-      -h seed.rin.so      -n ns.example.com -m admin.example.com
+      -h seed.rincoin.tech       -n ns.example.com -m admin.example.com \
+      -h seed.second.domain.org -n ns.example.com -m admin.example.com \
+      -h seed.otherdomain.net   -n ns.example.com -m admin.example.com
+
+`seed.rincoin.tech` is the primary seed of the Rincoin network;
+`second.domain.org` and `otherdomain.net` stand for whatever further
+domains you serve.
 
 For each configured zone, set up an `NS` record at the parent domain
 pointing at the host where dnsseed is running. Verify with:
 
-  $ dig @<seeder-ip> -p 53 NS  seed.rincoin.net
-  $ dig @<seeder-ip> -p 53 SOA seed.rincoin.org
-  $ dig @<seeder-ip> -p 53 A   seed.rin.so
+  $ dig @<seeder-ip> -p 53 NS  seed.rincoin.tech
+  $ dig @<seeder-ip> -p 53 SOA seed.second.domain.org
+  $ dig @<seeder-ip> -p 53 A   seed.otherdomain.net
 
 Queries for any name *not* matching one of the configured zones are
 answered with DNS RCODE 5 (REFUSED) and counted under the
@@ -84,40 +90,47 @@ answered with DNS RCODE 5 (REFUSED) and counted under the
 line.
 
 The well-known service-flag prefix form `xHHHH.<zone>` (e.g.
-`x9.seed.rincoin.net` for `NODE_NETWORK | NODE_WITNESS`) works
+`x9.seed.rincoin.tech` for `NODE_NETWORK | NODE_WITNESS`) works
 identically across every configured zone. The set of accepted hex
-masks is controlled by the built-in defaults and / or `-w`.
+masks is controlled by the built-in defaults and / or `-w` (which
+replaces the defaults).
+
+Rincoin Community Core asks its DNS seeds for `x1000009`
+(`NODE_NETWORK | NODE_WITNESS | NODE_MWEB`), or `x1000408` with
+`NODE_NETWORK_LIMITED` once it is synced; both are in the defaults.
+A filter means "nodes that have at least these bits": service bits
+the seeder does not know never keep a node out of an answer.
 
 PROTOCOL VERSION & SUBVER
 -------------------------
 
-The seeder advertises `PROTOCOL_VERSION = 70018` (the Rincoin
-`CUSTOMIZED_HALVING_VERSION`) and the subver string
-`/rincoin-community-seeder:2.0.0/`. Both are defined at compile time
-in `serialize.h` and `rincoin.cpp` respectively.
+The seeder advertises `PROTOCOL_VERSION = 70019` and the subver
+string `/RincoinCommunitySeeder:2.1.0/`, the same protocol version
+and the same naming style as Rincoin Community Core 1.2.0
+(`/RincoinCommunityCore:1.2.0/`). Both are defined at compile time in
+`serialize.h` and `rincoin.cpp` respectively.
 
-Why 70018:
-  Rincoin Core's `net_processing.cpp` disconnects any peer announcing
-  a `version < MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION (= 70018)`
-  once the customized halving has activated on the active chain. A
-  seeder that still announced the legacy `60000` would be unable to
+Why the number matters:
+  From the height-840,000 transition on, Rincoin Community Core
+  disconnects any peer announcing a version below its peer protocol
+  floor of 70018. A seeder that announced less would be unable to
   finish version negotiation, would never receive `addr` messages,
   and the database would slowly rot until `IsGood()` rejects every
-  entry. Bumping unconditionally is safe — pre-upgrade peers only
-  enforce `nVersion >= MIN_PEER_PROTO_VERSION (= 31800)`.
+  entry. Announcing a higher version than a peer's own is harmless:
+  nodes only enforce minimum versions, and both sides talk at the
+  lower of the two.
 
 If a future protocol bump happens, edit `PROTOCOL_VERSION` in
 `serialize.h` and the subver string in `rincoin.cpp::PushVersion()`.
 
-CUSTOMIZED HALVING ENFORCEMENT
-------------------------------
+PEER PROTOCOL FLOOR AFTER THE TRANSITION
+----------------------------------------
 
-Rincoin Core (`src/version.h`) defines
-`MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION = 70018`. Once the active
-chain reaches `nCustomizedHalvingPhase4StartHeight` (mainnet 840000,
-testnet 4200, regtest 600), Rincoin nodes refuse any peer that still
-announces a protocol version below 70018. The seeder mirrors that
-policy:
+Rincoin Community Core raises its peer protocol floor to 70018 at the
+height of the subsidy transition (mainnet 840000, testnet 8400): from
+then on nodes refuse any peer that still announces a lower protocol
+version. The seeder mirrors that policy (the option and the constants
+keep their earlier "customized halving" names):
 
   1.  Every successful `TestNode()` updates a global high-water mark
       `nBestSeenHeight` with the peer's reported `nStartingHeight`.
@@ -140,6 +153,16 @@ The cutoff only kicks in *after* the seeder has actually observed
 the network crossing the activation height, so a freshly-started
 seeder on a stale database does not immediately wipe its peer list
 on the strength of an arbitrary configured number.
+
+PREFERRING NEWER NODES (OPTIONAL)
+---------------------------------
+
+Off by default. `--preferversion <N>` makes the seeder fill its DNS
+answers from good nodes that announce at least protocol version N
+first, and from the other good nodes only when there are not enough
+of those. It excludes nobody; it only changes who is listed first
+while older and newer node versions coexist. Example: `--preferversion
+70019` prefers nodes of the Rincoin Community Core 1.2 line.
 
 DEPLOYMENT NOTES
 ----------------
@@ -221,8 +244,8 @@ subver). All three files are simple text and easy to parse.
 
 For external probing, any DNS resolver is enough:
 
-  dig @<seeder-ip> -p 53 +short A    seed.rincoin.net | wc -l
-  dig @<seeder-ip> -p 53 +short AAAA seed.rincoin.net | wc -l
+  dig @<seeder-ip> -p 53 +short A    seed.rincoin.tech | wc -l
+  dig @<seeder-ip> -p 53 +short AAAA seed.rincoin.tech | wc -l
 
 A successful query that returns at least one address is the most
 reliable single-shot liveness check.

@@ -1,4 +1,6 @@
-CXXFLAGS = -O3 -g0 -march=native
+# Portable by default. When building on the machine that will run the seeder you
+# can add CPU-specific tuning: make CXXFLAGS="-O3 -g0 -march=native"
+CXXFLAGS ?= -O3 -g0
 LDFLAGS = $(CXXFLAGS)
 
 # `rincoin.o` provides the version-handshake / address-relay logic that

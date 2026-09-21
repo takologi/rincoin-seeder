@@ -4,6 +4,7 @@
 using namespace std;
 
 int nMinimumHeight = 0;
+int nPreferVersion = 0;
 // 0 = "no cutoff configured". main() sets the appropriate default
 // (mainnet 840000, testnet 4200, regtest 600) and `--customizedhalvingheight`
 // can override it. Declared in db.h.
@@ -185,9 +186,13 @@ void CAddrDb::GetIPs_(set<CNetAddr>& ips, uint64_t requestedFlags, int max, cons
     return;
   }
   std::vector<int> goodIdFiltered;
+  std::vector<int> goodIdPreferred; // subset announcing at least nPreferVersion (only with --preferversion)
   for (std::set<int>::const_iterator it = goodId.begin(); it != goodId.end(); it++) {
-    if ((idToInfo[*it].services & requestedFlags) == requestedFlags)
+    if ((idToInfo[*it].services & requestedFlags) == requestedFlags) {
       goodIdFiltered.push_back(*it);
+      if (nPreferVersion > 0 && idToInfo[*it].clientVersion >= nPreferVersion)
+        goodIdPreferred.push_back(*it);
+    }
   }
 
   if (!goodIdFiltered.size())
@@ -199,6 +204,16 @@ void CAddrDb::GetIPs_(set<CNetAddr>& ips, uint64_t requestedFlags, int max, cons
     max = 1;
 
   set<int> ids;
+  // --preferversion: take from the preferred nodes first, by the same rule (a random
+  // sample of at most half of them), then top up from all good nodes as usual.
+  if (!goodIdPreferred.empty()) {
+    size_t want = goodIdPreferred.size() / 2;
+    if (want < 1) want = 1;
+    if (want > (size_t)max) want = max;
+    while (ids.size() < want) {
+      ids.insert(goodIdPreferred[rand() % goodIdPreferred.size()]);
+    }
+  }
   while (ids.size() < max) {
     ids.insert(goodIdFiltered[rand() % goodIdFiltered.size()]);
   }

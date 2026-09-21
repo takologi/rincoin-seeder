@@ -63,24 +63,22 @@ static const unsigned int MAX_SIZE = 0x02000000;
 
 // Protocol version advertised by this seeder when negotiating with peers.
 //
-// Why 70018?
+// Why 70019?
 // ----------
-// Rincoin Core defines `CUSTOMIZED_HALVING_VERSION = 70018` in
-// `src/version.h`. After the customized halving activation height,
-// `net_processing.cpp` disconnects any peer that announces a
-// version < 70018 (`MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION`).
+// It is the protocol version of Rincoin Community Core 1.2.0, the release line
+// this seeder belongs to, so that the two announce the same number.
 //
-// The seeder must therefore advertise at least 70018, otherwise it would
-// be unable to crawl the network as soon as the upgrade activates and the
-// `dnsseed.dat` database would slowly rot until no node passes
-// `IsGood()` (see `db.h`).
+// What matters for crawling is only that the number is not too low: from the
+// height-840,000 transition on, Rincoin Community Core disconnects any peer
+// that announces a version below 70018 (the peer protocol floor in
+// `Consensus::Params::vMinPeerProtoVersionFloors`). A seeder announcing less
+// could no longer crawl those nodes and its database would slowly rot until
+// no node passed `IsGood()` (see `db.h`).
 //
-// Advertising 70018 *before* activation is harmless: peers running older
-// 70017 builds only enforce `nVersion >= MIN_PEER_PROTO_VERSION` (31800)
-// for the connection, and the pre-upgrade warning in net_processing.cpp
-// fires only for `nVersion < 70018`, never for an *equal-or-higher*
-// version. So bumping unconditionally is safe.
-static const int PROTOCOL_VERSION = 70018;
+// Announcing a version that is higher than a peer's own is harmless: nodes only
+// enforce minimum versions, and both sides then talk at the lower of the two
+// (see `SetVersion(min(nVersion, PROTOCOL_VERSION))` in rincoin.cpp).
+static const int PROTOCOL_VERSION = 70019;
 
 // Used to bypass the rule against non-const reference to temporary
 // where it makes sense with wrappers such as CFlatData or CTxDB

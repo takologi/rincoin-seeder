@@ -86,11 +86,10 @@ class CNode {
     BeginMessage("version");
     int nBestHeight = GetRequireHeight();
     // Subversion string advertised to peers in the `version` message.
-    // Format follows BIP14 (slash-delimited). Peers display this in
-    // `getpeerinfo` so node operators can recognise the seeder.
-    // Bumped from "/bitcoin-seeder:0.01/" together with the
-    // PROTOCOL_VERSION upgrade to 70018 (customized halving).
-    string ver = "/rincoin-community-seeder:2.0.0/";
+    // Format follows BIP14 (slash-delimited), in the same style as the
+    // "/RincoinCommunityCore:x.y.z/" of the node software. Peers display
+    // this in `getpeerinfo` so node operators can recognise the seeder.
+    string ver = "/RincoinCommunitySeeder:2.1.0/";
     uint8_t fRelayTxs = 0;
     vSend << PROTOCOL_VERSION << nLocalServices << nTime << you << me << nLocalNonce << ver << nBestHeight << fRelayTxs;
     EndMessage();
@@ -334,7 +333,7 @@ int main(void) {
   // upstream bitcoin-seeder author's test host) with the rincoin
   // production seed. Compile only when the surrounding comment block is
   // removed and `g++ rincoin.cpp ... -o test` is invoked manually.
-  CService ip("seed.rincoin.net", 9555, true);
+  CService ip("seed.rincoin.tech", 9555, true);
   vector<CAddress> vAddr;
   vAddr.clear();
   int ban = 0;

@@ -29,12 +29,15 @@ public:
   // Anything > 0 is taken as an explicit override from
   // --customizedhalvingheight. See db.h::IsCustomizedHalvingEnforced().
   int nCustomizedHalvingHeightOpt;
+  // --preferversion: 0 (default) = off. See CAddrDb::GetIPs_().
+  int nPreferVersionOpt;
   int nDnsThreads;
   int fUseTestNet;
   int fWipeBan;
   int fWipeIgnore;
   // Multi-zone configuration. The seeder can be authoritative for several
-  // FQDNs at once (e.g. seed.rincoin.net, seed.rincoin.org, seed.rin.so)
+  // FQDNs at once (e.g. seed.rincoin.tech, seed.second.domain.org,
+  // seed.otherdomain.net)
   // through the single privileged UDP/53 socket. The three vectors below
   // are kept index-aligned: zoneHosts[i] is served with zoneNs[i] / zoneMbox[i].
   // Populated from the -h / -n / -m options (each may be repeated).
@@ -52,7 +55,7 @@ public:
   std::vector<string> vSeeds;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), nCustomizedHalvingHeightOpt(-1), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), nCustomizedHalvingHeightOpt(-1), nPreferVersionOpt(0), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
 
   void ParseCommandLine(int argc, char **argv) {
     static const char *help = "Rincoin community seeder\n"
@@ -82,23 +85,28 @@ public:
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
                               "--customizedhalvingheight <n>\n"
-                              "                Activation height of Rincoin's customized halving on the\n"
-                              "                network being crawled. Once the seeder has observed any\n"
-                              "                peer reporting a tip at or beyond this height, peers still\n"
-                              "                announcing protocol < 70018 will be marked not-good and\n"
-                              "                stop appearing in DNS answers (mirrors Rincoin Core's\n"
-                              "                MIN_CUSTOMIZED_HALVING_PEER_PROTO_VERSION enforcement).\n"
-                              "                Defaults: mainnet 840000, testnet 4200, regtest 600.\n"
+                              "                Height of the subsidy transition on the network being\n"
+                              "                crawled. Once the seeder has observed any peer reporting\n"
+                              "                a tip at or beyond this height, peers still announcing\n"
+                              "                protocol < 70018 will be marked not-good and stop\n"
+                              "                appearing in DNS answers (mirrors the peer protocol floor\n"
+                              "                that Rincoin Community Core enforces from that height).\n"
+                              "                Defaults: mainnet 840000, testnet 8400.\n"
                               "                Pass 0 to disable the cutoff entirely.\n"
+                              "--preferversion <n>\n"
+                              "                Off by default. With a protocol version <n>, DNS answers\n"
+                              "                are filled from good nodes announcing at least that\n"
+                              "                version first, and from the other good nodes only when\n"
+                              "                there are not enough of those. No node is excluded.\n"
                               "--testnet       Use testnet\n"
                               "--wipeban       Wipe list of banned nodes\n"
                               "--wipeignore    Wipe list of ignored nodes\n"
                               "-?, --help      Show this text\n"
                               "\n"
                               "Multi-zone example:\n"
-                              "  %s -h seed.rincoin.net -n ns.example.com -m admin.example.com \\\n"
-                              "     -h seed.rincoin.org -n ns.example.com -m admin.example.com \\\n"
-                              "     -h seed.rin.so      -n ns.example.com -m admin.example.com\n"
+                              "  %s -h seed.rincoin.tech       -n ns.example.com -m admin.example.com \\\n"
+                              "     -h seed.second.domain.org -n ns.example.com -m admin.example.com \\\n"
+                              "     -h seed.otherdomain.net   -n ns.example.com -m admin.example.com\n"
                               "\n";
     bool showHelp = false;
 
@@ -122,9 +130,10 @@ public:
         // Long-only options use values >= 256 so they never collide with
         // the short-option char range used by getopt_long().
         {"customizedhalvingheight", required_argument, 0, 256},
+        {"preferversion", required_argument, 0, 257},
         {"testnet", no_argument, &fUseTestNet, 1},
         {"wipeban", no_argument, &fWipeBan, 1},
-        {"wipeignore", no_argument, &fWipeBan, 1},
+        {"wipeignore", no_argument, &fWipeIgnore, 1},
         {"help", no_argument, 0, '?'},
         {0, 0, 0, 0}
       };
@@ -265,6 +274,17 @@ public:
           break;
         }
 
+        case 257: {
+          // --preferversion. 0 keeps the feature off; anything else has to look
+          // like a protocol version.
+          char *end = NULL;
+          long n = strtol(optarg, &end, 10);
+          if (end != optarg && (n == 0 || (n >= 70000 && n <= 99999))) {
+            nPreferVersionOpt = (int)n;
+          }
+          break;
+        }
+
         case '?': {
           showHelp = true;
           break;
@@ -297,6 +317,7 @@ public:
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_COMPACT_FILTERS);           // x1000448
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2);                    // x1000c08
         filter_whitelist.insert(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MWEB | NODE_P2P_V2 | NODE_COMPACT_FILTERS); // x1000c48
+        // Rincoin Community Core asks for x1000009 (or x1000408 once synced); both are above.
     }
     // Multi-zone validation: -h, -n, -m must each be supplied the same
     // number of times. The N-th -h is paired with the N-th -n / -m. If
@@ -319,7 +340,12 @@ public:
         showHelp = true;
       }
     }
-    if (showHelp) fprintf(stderr, help, argv[0], argv[0]);
+    if (showHelp) {
+      // Print the help and stop. (The upstream seeder printed it and then started
+      // crawling anyway, which is not what anybody asking for help expects.)
+      fprintf(stderr, help, argv[0], argv[0]);
+      exit(1);
+    }
   }
 };
 
@@ -630,7 +656,7 @@ extern "C" void* ThreadStats(void*) {
   return nullptr;
 }
 
-static const string mainnet_seeds[] = {"seed.rin.so", ""};
+static const string mainnet_seeds[] = {"seed.rincoin.tech", ""};
 static const string testnet_seeds[] = {""};
 static const string *seeds = mainnet_seeds;
 static vector<string> vSeeds;
@@ -695,10 +721,11 @@ int main(int argc, char **argv) {
   bool fDNS = true;
   if (opts.fUseTestNet) {
       printf("Using testnet.\n");
-      pchMessageStart[0] = 0x0b;
-      pchMessageStart[1] = 0x11;
-      pchMessageStart[2] = 0x09;
-      pchMessageStart[3] = 0x07;
+      // Rincoin testnet message start: 'r' 'i' 'n' 't'
+      pchMessageStart[0] = 0x72;
+      pchMessageStart[1] = 0x69;
+      pchMessageStart[2] = 0x6e;
+      pchMessageStart[3] = 0x74;
       seeds = testnet_seeds;
       fTestNet = true;
   }
@@ -718,18 +745,22 @@ int main(int argc, char **argv) {
     printf("Using minimum height %i\n", opts.nMinimumHeight);
     nMinimumHeight = opts.nMinimumHeight;
   }
-  // Resolve the customized-halving cutoff once we know the network. The
-  // defaults mirror Rincoin Core's `nCustomizedHalvingPhase4StartHeight`
-  // (= 4 * nSubsidyHalvingInterval) from src/chainparams.cpp:
+  // Resolve the cutoff height once we know the network. The defaults mirror
+  // the transition height of Rincoin Community Core 1.2.0
+  // (`Consensus::Params::nS6bHeight` = 4 * nSubsidyHalvingInterval) from
+  // src/chainparams.cpp:
   //   mainnet: 4 * 210000 = 840000
-  //   testnet: 4 *   1050 =   4200
-  //   regtest: 4 *    150 =    600   (never reached by --testnet here)
+  //   testnet: 4 *   2100 =   8400
   // 0 explicitly disables the cutoff. -1 (the default opt value) means
   // "use the per-network default".
   if (opts.nCustomizedHalvingHeightOpt >= 0) {
       nCustomizedHalvingHeight = opts.nCustomizedHalvingHeightOpt;
   } else {
-      nCustomizedHalvingHeight = opts.fUseTestNet ? 4200 : 840000;
+      nCustomizedHalvingHeight = opts.fUseTestNet ? 8400 : 840000;
+  }
+  if (opts.nPreferVersionOpt > 0) {
+    nPreferVersion = opts.nPreferVersionOpt;
+    printf("Preferring nodes with protocol version >= %i in DNS answers (none are excluded)\n", nPreferVersion);
   }
   if (nCustomizedHalvingHeight > 0) {
     printf("Customized halving cutoff: %i (peers with proto<70018 will be"
