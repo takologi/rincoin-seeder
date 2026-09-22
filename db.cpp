@@ -88,9 +88,17 @@ void CAddrDb::Good_(const CService &addr, int clientV, std::string clientSV, int
   info.blocks = blocks;
   info.services = services;
   info.Update(true);
-  if (info.IsGood() && goodId.count(id)==0) {
+  // Re-evaluate membership in goodId on every successful test. IsGood() can
+  // turn false for a reachable peer without the peer ever failing a test:
+  // once nBestSeenHeight crosses the customized-halving cutoff, peers that
+  // still announce a protocol version below 70018 must leave the DNS
+  // answers, and the answers are built from goodId alone.
+  if (info.IsGood()) {
     goodId.insert(id);
 //    printf("%s: good; %i good nodes now\n", ToString(addr).c_str(), (int)goodId.size());
+  } else {
+    goodId.erase(id);
+//    printf("%s: no longer good; %i good nodes left\n", ToString(addr).c_str(), (int)goodId.size());
   }
   nDirty++;
   ourId.push_back(id);

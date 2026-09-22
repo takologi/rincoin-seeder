@@ -337,9 +337,23 @@ public:
         db->nId = 0;
         int n = 0;
         READWRITE(n);
+        // Two passes: nBestSeenHeight is not stored in dnsseed.dat, so it is
+        // rebuilt from the heights the peers reported at their last
+        // successful test before IsGood() decides who enters goodId.
+        // Otherwise a restart would re-list every pre-cutoff peer until the
+        // crawler has observed the chain height again.
+        std::vector<CAddrInfo> loaded;
+        loaded.reserve(n);
+        int bestSeen = nBestSeenHeight.load(std::memory_order_relaxed);
         for (int i=0; i<n; i++) {
           CAddrInfo info;
           READWRITE(info);
+          if (info.blocks > bestSeen) bestSeen = info.blocks;
+          loaded.push_back(info);
+        }
+        nBestSeenHeight.store(bestSeen, std::memory_order_relaxed);
+        for (int i=0; i<(int)loaded.size(); i++) {
+          const CAddrInfo &info = loaded[i];
           if (!info.GetBanTime()) {
             int id = db->nId++;
             db->idToInfo[id] = info;

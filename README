@@ -142,6 +142,11 @@ keep their earlier "customized halving" names):
       operator who later upgrades is re-listed automatically on the
       next successful test cycle without having to wait out a ban
       window.
+  4.  The demotion takes effect at the peer's next successful test
+      after the height was observed: `Good_()` re-evaluates `IsGood()`
+      every time and removes the peer from the answer set when it no
+      longer qualifies. Until that test (the crawler re-tests a good
+      peer about every 1000 s) the peer may still appear in answers.
 
 The activation height defaults to the per-network value above and
 can be overridden with the `--customizedhalvingheight <N>` flag.
@@ -151,8 +156,33 @@ startup right after the network banner.
 
 The cutoff only kicks in *after* the seeder has actually observed
 the network crossing the activation height, so a freshly-started
-seeder on a stale database does not immediately wipe its peer list
-on the strength of an arbitrary configured number.
+seeder on an empty database does not immediately wipe its peer list
+on the strength of an arbitrary configured number. The observed
+height itself is not stored in `dnsseed.dat`; on start-up it is
+rebuilt from the heights the peers reported at their last successful
+test, so a restart after the transition keeps the cutoff in force.
+
+TEST NETWORKS (REGTEST, PREVIEW)
+--------------------------------
+
+There is no `--regtest` or `--preview` switch; `--testnet` only
+covers testnet. Both other networks work with the generic options,
+but three defaults stay at their mainnet values and must be set by
+hand:
+
+  ./dnsseed -h seed.example -n ns.example -m admin.example \
+      --magic 72726374 --p2port 29555 \        # regtest ("rrct")
+      --customizedhalvingheight 840 --minheight 1
+
+  ./dnsseed ... --magic 72696e70 --p2port 49555 \   # preview ("rinp")
+      --customizedhalvingheight 840 --minheight 1
+
+`--customizedhalvingheight` defaults to 840000 (8400 with
+`--testnet`); the transition height of regtest and preview is 840.
+`--minheight` defaults to 35 (50 with `--testnet`); below that
+height a fresh chain has no good nodes at all. The bootstrap peers
+are given with `-s <host-or-ip>` (repeatable); it replaces the
+built-in seed list.
 
 PREFERRING NEWER NODES (OPTIONAL)
 ---------------------------------
